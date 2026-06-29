@@ -448,6 +448,7 @@ label {
 .overlay-body {
   background: rgba(10, 16, 24, 0.28);
   cursor: crosshair;
+  outline: none;
   user-select: none;
 }
 
@@ -456,11 +457,120 @@ label {
   border: 1px solid #ffffff;
   background: rgba(31, 111, 235, 0.12);
   box-shadow: 0 0 0 9999px rgba(5, 9, 14, 0.36);
+  cursor: move;
+}
+
+.selection-box.is-drawing {
+  cursor: crosshair;
+}
+
+.selection-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #ffffff;
+  border-radius: 50%;
+  background: #1f6feb;
+  box-shadow: 0 1px 3px rgba(5, 9, 14, 0.4);
+}
+
+.selection-handle[data-handle="n"] {
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+
+.selection-handle[data-handle="ne"] {
+  top: -6px;
+  right: -6px;
+  cursor: nesw-resize;
+}
+
+.selection-handle[data-handle="e"] {
+  top: 50%;
+  right: -6px;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+
+.selection-handle[data-handle="se"] {
+  right: -6px;
+  bottom: -6px;
+  cursor: nwse-resize;
+}
+
+.selection-handle[data-handle="s"] {
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+
+.selection-handle[data-handle="sw"] {
+  bottom: -6px;
+  left: -6px;
+  cursor: nesw-resize;
+}
+
+.selection-handle[data-handle="w"] {
+  top: 50%;
+  left: -6px;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+
+.selection-handle[data-handle="nw"] {
+  top: -6px;
+  left: -6px;
+  cursor: nwse-resize;
+}
+
+.selection-actions {
+  position: absolute;
+  left: var(--selection-actions-left, 0);
+  bottom: -38px;
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.94);
+  box-shadow: 0 8px 22px rgba(5, 9, 14, 0.22);
+}
+
+.selection-box[data-actions-placement="top"] .selection-actions {
+  top: -38px;
+  bottom: auto;
+}
+
+.selection-action {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #d8dee8;
+  border-radius: 7px;
+  background: #fff;
+  color: #1f2328;
+  cursor: pointer;
+}
+
+.selection-action:hover {
+  border-color: #1f6feb;
+  color: #1f6feb;
+}
+
+.selection-action.primary-tool {
+  border-color: #1f6feb;
+  background: #1f6feb;
+  color: #fff;
 }
 
 .selection-size {
   position: fixed;
-  transform: translateY(-28px);
   min-width: 64px;
   padding: 4px 8px;
   border-radius: 6px;
@@ -468,6 +578,7 @@ label {
   color: #fff;
   font-size: 12px;
   text-align: center;
+  pointer-events: none;
 }
 
 @media (max-width: 420px) {

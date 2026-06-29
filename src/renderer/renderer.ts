@@ -9,6 +9,11 @@ interface Rect {
   height: number;
 }
 
+interface Point {
+  x: number;
+  y: number;
+}
+
 interface TranslationProvider {
   id: string;
   name: string;
@@ -93,15 +98,108 @@ if (mode === "overlay") {
 
 function renderOverlay(): void {
   document.body.className = "overlay-body";
+  document.body.tabIndex = 0;
+  document.body.focus();
+
   const originX = Number(params.get("x") ?? "0");
   const originY = Number(params.get("y") ?? "0");
-  let start: { x: number; y: number } | null = null;
-  let currentBox: HTMLElement | null = null;
-  let currentSize: HTMLElement | null = null;
+  const minSize = 6;
+  type OverlayMode = "idle" | "draw" | "move" | "resize";
+
+  let mode: OverlayMode = "idle";
+  let dragStart: Point | null = null;
+  let baseSelection: Rect | null = null;
+  let activeHandle = "";
+  let selection: Rect | null = null;
+  let selectionBox: HTMLElement | null = null;
+  let sizeLabel: HTMLElement | null = null;
+
+  const getPoint = (event: MouseEvent): Point => clampPoint({ x: event.clientX, y: event.clientY });
+
+  const ensureSelectionElements = (): void => {
+    if (selectionBox && sizeLabel) {
+      return;
+    }
+
+    selectionBox = document.createElement("div");
+    sizeLabel = document.createElement("div");
+    selectionBox.className = "selection-box";
+    sizeLabel.className = "selection-size";
+
+    for (const handle of ["n", "ne", "e", "se", "s", "sw", "w", "nw"]) {
+      const handleElement = document.createElement("div");
+      handleElement.className = "selection-handle";
+      handleElement.dataset.handle = handle;
+      selectionBox.append(handleElement);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "selection-actions";
+    const confirmButton = document.createElement("button");
+    confirmButton.className = "selection-action primary-tool";
+    confirmButton.title = "\u786e\u8ba4";
+    confirmButton.setAttribute("aria-label", "\u786e\u8ba4");
+    confirmButton.innerHTML = icon("check");
+    const cancelButton = document.createElement("button");
+    cancelButton.className = "selection-action";
+    cancelButton.title = "\u53d6\u6d88";
+    cancelButton.setAttribute("aria-label", "\u53d6\u6d88");
+    cancelButton.innerHTML = icon("close");
+    actions.append(confirmButton, cancelButton);
+    selectionBox.append(actions);
+    document.body.append(selectionBox, sizeLabel);
+
+    confirmButton.addEventListener("mousedown", (event) => event.stopPropagation());
+    confirmButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmSelection();
+    });
+    cancelButton.addEventListener("mousedown", (event) => event.stopPropagation());
+    cancelButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void window.translator.cancelCapture();
+    });
+  };
+
+  const updateSelection = (rect: Rect): void => {
+    ensureSelectionElements();
+    selection = clampSelectionRect(rect, window.innerWidth, window.innerHeight, minSize);
+    updateSelectionBox(selection, selectionBox!, sizeLabel!);
+  };
+
+  const clearSelection = (): void => {
+    selection = null;
+    selectionBox?.remove();
+    sizeLabel?.remove();
+    selectionBox = null;
+    sizeLabel = null;
+  };
+
+  function confirmSelection(): void {
+    if (!selection || selection.width < minSize || selection.height < minSize) {
+      return;
+    }
+
+    void window.translator.finishSelection({
+      x: Math.round(selection.x + originX),
+      y: Math.round(selection.y + originY),
+      width: Math.round(selection.width),
+      height: Math.round(selection.height)
+    });
+  }
+
+  window.addEventListener("contextmenu", (event) => event.preventDefault());
 
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      event.preventDefault();
       void window.translator.cancelCapture();
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      confirmSelection();
     }
   });
 
@@ -109,46 +207,90 @@ function renderOverlay(): void {
     if (event.button !== 0) {
       return;
     }
-    start = { x: event.clientX, y: event.clientY };
-    currentBox?.remove();
-    currentSize?.remove();
-    currentBox = document.createElement("div");
-    currentSize = document.createElement("div");
-    currentBox.className = "selection-box";
-    currentSize.className = "selection-size";
-    document.body.append(currentBox, currentSize);
-    updateSelectionBox(start, start, currentBox, currentSize);
+
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest(".selection-action")) {
+      return;
+    }
+
+    const point = getPoint(event);
+    const handle = target?.closest(".selection-handle") as HTMLElement | null;
+    if (handle && selection) {
+      mode = "resize";
+      activeHandle = handle.dataset.handle ?? "";
+      dragStart = point;
+      baseSelection = { ...selection };
+      event.preventDefault();
+      return;
+    }
+
+    if (target?.closest(".selection-box") && selection) {
+      mode = "move";
+      dragStart = point;
+      baseSelection = { ...selection };
+      event.preventDefault();
+      return;
+    }
+
+    mode = "draw";
+    activeHandle = "";
+    dragStart = point;
+    baseSelection = null;
+    updateSelection({ x: point.x, y: point.y, width: minSize, height: minSize });
+    selectionBox?.classList.add("is-drawing");
+    event.preventDefault();
   });
 
   window.addEventListener("mousemove", (event) => {
-    if (!start || !currentBox || !currentSize) {
+    if (mode === "idle" || !dragStart) {
       return;
     }
-    updateSelectionBox(start, { x: event.clientX, y: event.clientY }, currentBox, currentSize);
+
+    const point = getPoint(event);
+    if (mode === "draw") {
+      updateSelection(normalizeRect(dragStart, point));
+      return;
+    }
+
+    if (mode === "move" && baseSelection) {
+      updateSelection({
+        ...baseSelection,
+        x: baseSelection.x + point.x - dragStart.x,
+        y: baseSelection.y + point.y - dragStart.y
+      });
+      return;
+    }
+
+    if (mode === "resize" && baseSelection) {
+      updateSelection(resizeSelectionRect(baseSelection, activeHandle, point));
+    }
   });
 
   window.addEventListener("mouseup", (event) => {
-    if (!start || event.button !== 0) {
+    if (event.button !== 0 || mode === "idle") {
       return;
     }
 
-    const local = normalizeRect(start, { x: event.clientX, y: event.clientY });
-    start = null;
-
-    if (local.width < 6 || local.height < 6) {
-      void window.translator.cancelCapture();
-      return;
+    if (mode === "draw" && dragStart) {
+      const local = normalizeRect(dragStart, getPoint(event));
+      if (local.width < minSize || local.height < minSize) {
+        clearSelection();
+      }
     }
 
-    void window.translator.finishSelection({
-      x: Math.round(local.x + originX),
-      y: Math.round(local.y + originY),
-      width: Math.round(local.width),
-      height: Math.round(local.height)
-    });
+    mode = "idle";
+    dragStart = null;
+    baseSelection = null;
+    activeHandle = "";
+    selectionBox?.classList.remove("is-drawing");
+  });
+
+  window.addEventListener("dblclick", (event) => {
+    if ((event.target as HTMLElement | null)?.closest(".selection-box")) {
+      confirmSelection();
+    }
   });
 }
-
 async function renderResult(): Promise<void> {
   appElement.innerHTML = `
     <section class="result-shell">
@@ -354,39 +496,84 @@ async function renderSettings(): Promise<void> {
   });
 }
 
-function icon(name: "translate" | "close" | "model" | "retry" | "copy"): string {
+function icon(name: "translate" | "close" | "model" | "retry" | "copy" | "check"): string {
   const paths: Record<typeof name, string> = {
     translate: '<path d="m5 8 4 4"/><path d="m4 14 5-10 5 10"/><path d="M13 6h7"/><path d="M16 6c0 4-2 7-5 9"/><path d="M14 11c1 2 3 4 6 5"/>',
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
     model: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6"/><path d="M9 13h6"/><path d="M9 17h3"/>',
     retry: '<path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M18 12a6 6 0 0 0-10-4.5L4 12"/><path d="M6 12a6 6 0 0 0 10 4.5L20 12"/>',
-    copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/>'
+    copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>'
   };
 
   return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
 }
-function updateSelectionBox(
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-  box: HTMLElement,
-  sizeLabel: HTMLElement
-): void {
-  const rect = normalizeRect(start, end);
+function updateSelectionBox(rect: Rect, box: HTMLElement, sizeLabel: HTMLElement): void {
   box.style.left = `${rect.x}px`;
   box.style.top = `${rect.y}px`;
   box.style.width = `${rect.width}px`;
   box.style.height = `${rect.height}px`;
-  sizeLabel.style.left = `${rect.x}px`;
-  sizeLabel.style.top = `${rect.y}px`;
+  box.dataset.actionsPlacement = rect.y + rect.height + 42 > window.innerHeight && rect.y > 40 ? "top" : "bottom";
+  const actionsWidth = 76;
+  const actionsLeft = clamp(rect.width - actionsWidth, -rect.x, window.innerWidth - rect.x - actionsWidth);
+  box.style.setProperty("--selection-actions-left", `${actionsLeft}px`);
+
+  const labelWidth = 92;
+  const labelLeft = clamp(rect.x, 4, Math.max(4, window.innerWidth - labelWidth - 4));
+  const labelAbove = rect.y > 30;
+  sizeLabel.style.left = `${labelLeft}px`;
+  sizeLabel.style.top = labelAbove ? `${rect.y}px` : `${rect.y + rect.height + 8}px`;
+  sizeLabel.style.transform = labelAbove ? "translateY(-28px)" : "translateY(0)";
   sizeLabel.textContent = `${Math.round(rect.width)} x ${Math.round(rect.height)}`;
 }
 
-function normalizeRect(start: { x: number; y: number }, end: { x: number; y: number }): Rect {
+function normalizeRect(start: Point, end: Point): Rect {
   const x = Math.min(start.x, end.x);
   const y = Math.min(start.y, end.y);
   const width = Math.abs(end.x - start.x);
   const height = Math.abs(end.y - start.y);
   return { x, y, width, height };
+}
+
+function clampPoint(point: Point): Point {
+  return {
+    x: clamp(point.x, 0, Math.max(0, window.innerWidth)),
+    y: clamp(point.y, 0, Math.max(0, window.innerHeight))
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function clampSelectionRect(rect: Rect, maxWidth: number, maxHeight: number, minSize: number): Rect {
+  const width = Math.min(Math.max(rect.width, minSize), Math.max(minSize, maxWidth));
+  const height = Math.min(Math.max(rect.height, minSize), Math.max(minSize, maxHeight));
+  const x = clamp(rect.x, 0, Math.max(0, maxWidth - width));
+  const y = clamp(rect.y, 0, Math.max(0, maxHeight - height));
+  return { x, y, width: Math.min(width, maxWidth - x), height: Math.min(height, maxHeight - y) };
+}
+
+function resizeSelectionRect(base: Rect, handle: string, point: Point): Rect {
+  let left = base.x;
+  let top = base.y;
+  let right = base.x + base.width;
+  let bottom = base.y + base.height;
+
+  if (handle.includes("w")) {
+    left = point.x;
+  }
+  if (handle.includes("e")) {
+    right = point.x;
+  }
+  if (handle.includes("n")) {
+    top = point.y;
+  }
+  if (handle.includes("s")) {
+    bottom = point.y;
+  }
+
+  return normalizeRect({ x: left, y: top }, { x: right, y: bottom });
 }
 
 function setupSplitter(workspace: HTMLElement, splitter: HTMLElement): void {

@@ -2,14 +2,14 @@ import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeIma
 import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig, Rect, ResultState } from "../shared/types";
-import { captureSelection, getVirtualBounds } from "./capture";
+import { captureSelection } from "./capture";
 import { loadConfig, saveConfig, toRuntimeConfig } from "./config";
 import { recognizeImages, shutdownOcr } from "./ocr";
 import { translateTextStream } from "./translation";
 
 let config: AppConfig;
 let tray: Tray | null = null;
-let overlayWindow: BrowserWindow | null = null;
+let overlayWindows: BrowserWindow[] = [];
 let resultWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
 let currentResultState: ResultState = createIdleState();
@@ -18,6 +18,13 @@ let resultReadyResolver: (() => void) | null = null;
 let resultReadyPromise: Promise<void> | null = null;
 let lastJob: { selection?: Rect; sourceText?: string } = {};
 let isQuitting = false;
+let isCaptureStarting = false;
+let isHandlingSelection = false;
+
+if (process.env.SCREENSHOT_TRANSLATOR_USER_DATA_DIR) {
+  fs.mkdirSync(process.env.SCREENSHOT_TRANSLATOR_USER_DATA_DIR, { recursive: true });
+  app.setPath("userData", process.env.SCREENSHOT_TRANSLATOR_USER_DATA_DIR);
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -25,11 +32,6 @@ if (!gotLock) {
 }
 
 app.setAppUserModelId("com.codex.screenshottranslator");
-
-if (process.env.SCREENSHOT_TRANSLATOR_USER_DATA_DIR) {
-  fs.mkdirSync(process.env.SCREENSHOT_TRANSLATOR_USER_DATA_DIR, { recursive: true });
-  app.setPath("userData", process.env.SCREENSHOT_TRANSLATOR_USER_DATA_DIR);
-}
 
 app.whenReady().then(() => {
   config = loadConfig();
@@ -179,56 +181,92 @@ function registerConfiguredHotkey(): void {
 }
 
 function startCapture(): void {
-  closeOverlay();
-  const bounds = getVirtualBounds();
-  overlayWindow = new BrowserWindow({
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
-    fullscreenable: false,
-    hasShadow: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    backgroundColor: "#00000000",
-    webPreferences: commonWebPreferences()
-  });
-
-  overlayWindow.setAlwaysOnTop(true, "screen-saver");
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.loadFile(rendererFile(), {
-    query: {
-      window: "overlay",
-      x: String(bounds.x),
-      y: String(bounds.y),
-      width: String(bounds.width),
-      height: String(bounds.height)
-    }
-  });
-  overlayWindow.once("ready-to-show", () => {
-    overlayWindow?.show();
-    overlayWindow?.focus();
-  });
-  overlayWindow.on("closed", () => {
-    overlayWindow = null;
-  });
-}
-
-async function handleSelection(selection: Rect): Promise<void> {
-  if (selection.width < 6 || selection.height < 6) {
-    closeOverlay();
+  if (isCaptureStarting || activeOverlayWindows().length > 0) {
+    focusOverlayWindows();
     return;
   }
 
-  closeOverlay();
-  await delay(140);
-  lastJob = { selection };
-  await showResultWindow(selection);
-  await waitForResultRenderer();
+  isCaptureStarting = true;
+  try {
+    const displays = screen.getAllDisplays();
+    for (const display of displays) {
+      const bounds = display.bounds;
+      const overlayWindow = new BrowserWindow({
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        frame: false,
+        transparent: true,
+        resizable: false,
+        movable: false,
+        fullscreenable: false,
+        hasShadow: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        show: false,
+        backgroundColor: "#00000000",
+        webPreferences: commonWebPreferences()
+      });
+
+      overlayWindows.push(overlayWindow);
+      overlayWindow.setAlwaysOnTop(true, "screen-saver");
+      overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      overlayWindow.webContents.on("before-input-event", (event, input) => {
+        if (input.key === "Escape") {
+          event.preventDefault();
+          closeOverlay();
+        }
+      });
+      overlayWindow.loadFile(rendererFile(), {
+        query: {
+          window: "overlay",
+          x: String(bounds.x),
+          y: String(bounds.y),
+          width: String(bounds.width),
+          height: String(bounds.height),
+          displayId: String(display.id)
+        }
+      });
+      overlayWindow.once("ready-to-show", () => {
+        if (!overlayWindow.isDestroyed()) {
+          overlayWindow.show();
+          overlayWindow.focus();
+        }
+      });
+      overlayWindow.on("closed", () => {
+        overlayWindows = overlayWindows.filter((window) => window !== overlayWindow);
+      });
+    }
+
+    focusOverlayWindows();
+  } finally {
+    isCaptureStarting = false;
+  }
+}
+
+async function handleSelection(selection: Rect): Promise<void> {
+  if (isHandlingSelection) {
+    return;
+  }
+
+  isHandlingSelection = true;
+  if (selection.width < 6 || selection.height < 6) {
+    closeOverlay();
+    isHandlingSelection = false;
+    return;
+  }
+
+  try {
+    closeOverlay();
+    await delay(140);
+    lastJob = { selection };
+    await showResultWindow(selection);
+    await waitForResultRenderer();
+  } finally {
+    isHandlingSelection = false;
+  }
+
   await runJob(selection);
 }
 
@@ -526,10 +564,25 @@ function broadcastConfig(): void {
 }
 
 function closeOverlay(): void {
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
+  for (const overlayWindow of activeOverlayWindows()) {
     overlayWindow.close();
   }
-  overlayWindow = null;
+  overlayWindows = [];
+  isCaptureStarting = false;
+}
+
+function activeOverlayWindows(): BrowserWindow[] {
+  overlayWindows = overlayWindows.filter((window) => !window.isDestroyed());
+  return overlayWindows;
+}
+
+function focusOverlayWindows(): void {
+  for (const overlayWindow of activeOverlayWindows()) {
+    if (!overlayWindow.isVisible()) {
+      overlayWindow.show();
+    }
+    overlayWindow.focus();
+  }
 }
 
 function commonWebPreferences(): Electron.WebPreferences {
